@@ -68,6 +68,12 @@ RUN update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1
 RUN test -d /usr/local/cuda-12.8 \
  || ln -sf /usr/local/cuda /usr/local/cuda-12.8
 
+# -- Configure git proxy (corporate networks may block direct GitHub access) ----
+RUN if [ -n "$http_proxy" ]; then \
+      git config --global http.proxy "$http_proxy" && \
+      git config --global https.proxy "$https_proxy"; \
+    fi
+
 # -- Create non-root user ------------------------------------------------------
 RUN groupadd -r partsam && useradd -r -g partsam -m -s /bin/bash partsam
 
