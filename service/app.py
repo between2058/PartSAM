@@ -38,6 +38,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="PartSAM", lifespan=lifespan)
 
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+
 
 def _get_extension(filename: str) -> str:
     _, ext = os.path.splitext(filename)
@@ -78,6 +80,8 @@ async def segment_auto(
     use_graph_cut: bool = Query(True),
 ):
     file_bytes = await file.read()
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
     _validate_file(file.filename)
     ext = _get_extension(file.filename)
 

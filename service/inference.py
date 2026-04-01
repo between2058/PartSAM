@@ -3,6 +3,7 @@ import gc
 import numpy as np
 import pointops
 import torch
+import trimesh
 
 from utils.infer_utils import nms, sort_masks_by_area, post_processing
 from service.config import Settings
@@ -73,10 +74,6 @@ def auto_segment(
     masks = masks[top_indices]
     scores = scores[top_indices]
 
-    # Reset model cache
-    model.labels = None
-    model.pc_embeddings = None
-
     # NMS
     nms_indices = nms(masks, scores, threshold=settings.nms_threshold)
     filtered_masks = masks[nms_indices]
@@ -97,8 +94,6 @@ def auto_segment(
     )
 
     # Post-processing
-    import trimesh
-
     mesh = trimesh.Trimesh(
         vertices=data_gpu["vertices"][0].squeeze(0).cpu().numpy(),
         faces=data_gpu["faces"][0].squeeze(0).cpu().numpy(),
@@ -126,13 +121,9 @@ def prompt_segment(
         else:
             data_gpu[k] = v
 
-    prompt_coords = torch.tensor(points, dtype=torch.float32, device=device).unsqueeze(0).unsqueeze(1)
-    prompt_labels_t = torch.tensor(labels, dtype=torch.long, device=device).unsqueeze(0)
-
-    # If multiple prompt points, reshape appropriately
-    if len(points) > 1:
-        prompt_coords = torch.tensor(points, dtype=torch.float32, device=device).unsqueeze(0)
-        prompt_labels_t = torch.tensor(labels, dtype=torch.long, device=device).unsqueeze(0)
+    # prompt_coords: [B, num_points, 3], prompt_labels: [B, num_points]
+    prompt_coords = torch.tensor(points, dtype=torch.float32, device=device).unsqueeze(0)  # [1, P, 3]
+    prompt_labels_t = torch.tensor(labels, dtype=torch.long, device=device).unsqueeze(0)   # [1, P]
 
     with torch.no_grad():
         data_in = {
@@ -160,17 +151,11 @@ def prompt_segment(
     face_votes = np.zeros(num_faces, dtype=np.int32)
     face_counts = np.zeros(num_faces, dtype=np.int32)
 
-    for i, face_idx in enumerate(point_to_face):
-        face_counts[face_idx] += 1
-        if best_mask[i]:
-            face_votes[face_idx] += 1
+    np.add.at(face_counts, point_to_face, 1)
+    np.add.at(face_votes, point_to_face[best_mask], 1)
 
     # Face is selected if majority of its points are in the mask
     face_labels = (face_votes > face_counts / 2).astype(np.int32)
-
-    # Reset model cache
-    model.labels = None
-    model.pc_embeddings = None
 
     return face_labels
 
@@ -185,22 +170,23 @@ def _point_labels_to_face_labels(
     """Map point-level labels to face-level labels via voting + KNN fill."""
     num_faces = len(faces)
     num_labels = int(labels.max()) + 1
+    labels_np = labels.numpy()
+    valid_points = labels_np >= 0
     votes = np.zeros((num_faces, num_labels), dtype=np.int32)
-    np.add.at(votes, (face_index, labels.numpy()), 1)
+    np.add.at(votes, (face_index[valid_points], labels_np[valid_points]), 1)
     max_votes_labels = np.argmax(votes, axis=1)
     max_votes_labels[np.all(votes == 0, axis=1)] = -1
 
     # KNN fill for unlabeled faces
     valid_mask = max_votes_labels != -1
-    import trimesh as _trimesh
 
-    mesh_temp = _trimesh.Trimesh(vertices=vertices, faces=faces)
+    mesh_temp = trimesh.Trimesh(vertices=vertices, faces=faces)
     face_centroids = mesh_temp.triangles_center
     coord = torch.tensor(face_centroids, device=device).contiguous().float()
     valid_coord = coord[valid_mask]
-    valid_offset = torch.tensor([valid_coord.shape[0]], device=device)
+    valid_offset = torch.tensor(valid_coord.shape[0], device=device)
     invalid_coord = coord[~valid_mask]
-    invalid_offset = torch.tensor([invalid_coord.shape[0]], device=device)
+    invalid_offset = torch.tensor(invalid_coord.shape[0], device=device)
 
     if invalid_coord.shape[0] > 0:
         indices, _ = pointops.knn_query(
